@@ -5,6 +5,7 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::models::ActivePermissionProfile;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -161,5 +162,35 @@ fn older_reviewer_is_used_when_latest_turn_context_omits_it() {
             approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
             active_permission_profile: None,
         })
+    );
+}
+
+#[test]
+fn thread_full_access_survives_a_later_turn_without_profile_identity() {
+    let mut checkpoint = settings_item(
+        AskForApproval::Never,
+        ApprovalsReviewer::User,
+        /*active_permission_profile*/ None,
+    );
+    let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut checkpoint else {
+        unreachable!();
+    };
+    event.thread_settings.permission_profile = PermissionProfile::Disabled;
+    let history = vec![
+        checkpoint,
+        turn_context_item(
+            "turn-1",
+            AskForApproval::Never,
+            Some(ApprovalsReviewer::User),
+            /*active_permission_profile*/ None,
+        ),
+    ];
+
+    assert_eq!(
+        latest_persisted_resume_settings(&history)
+            .and_then(|settings| settings.active_permission_profile),
+        Some(ActivePermissionProfile::new(
+            BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS,
+        ))
     );
 }

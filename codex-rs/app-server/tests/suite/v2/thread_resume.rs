@@ -1826,6 +1826,99 @@ async fn cold_resume_without_active_permission_profile_uses_current_config() -> 
 }
 
 #[tokio::test]
+async fn cold_resume_preserves_thread_full_access_without_active_profile() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let test_timeout = std::time::Duration::from_secs(30);
+    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        let codex_home = TempDir::new()?;
+        MockResponsesConfig::new(&server.uri())
+            .with_root_config(&format!(
+                "default_permissions = \"{BUILT_IN_PERMISSION_PROFILE_WORKSPACE}\""
+            ))
+            .write(codex_home.path())?;
+        let thread_id = {
+            let mut mcp = TestAppServer::builder()
+                .with_codex_home(codex_home.path())
+                .without_managed_config()
+                .build_initialized_with_timeout(test_timeout)
+                .await?;
+            let ThreadStartResponse { thread, .. } = mcp
+                .start_thread(ThreadStartParams {
+                    model: Some("mock-model".to_string()),
+                    history_mode: Some(history_mode),
+                    ..Default::default()
+                })
+                .await?;
+            timeout(
+                test_timeout,
+                mcp.start_turn_and_wait_for_completion(TurnStartParams {
+                    thread_id: thread.id.clone(),
+                    input: vec![UserInput::Text {
+                        text: "materialize thread history".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                    ..Default::default()
+                }),
+            )
+            .await??;
+            let update_id = mcp
+                .send_thread_settings_update_request(ThreadSettingsUpdateParams {
+                    thread_id: thread.id.clone(),
+                    sandbox_policy: Some(AppSandboxPolicy::DangerFullAccess),
+                    ..Default::default()
+                })
+                .await?;
+            let _: ThreadSettingsUpdateResponse =
+                timeout(test_timeout, mcp.read_response(update_id)).await??;
+            timeout(
+                test_timeout,
+                mcp.read_stream_until_notification_message("thread/settings/updated"),
+            )
+            .await??;
+            timeout(
+                test_timeout,
+                mcp.start_turn_and_wait_for_completion(TurnStartParams {
+                    thread_id: thread.id.clone(),
+                    input: vec![UserInput::Text {
+                        text: "persist thread full access".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                    ..Default::default()
+                }),
+            )
+            .await??;
+            thread.id
+        };
+
+        let mut mcp = TestAppServer::builder()
+            .with_codex_home(codex_home.path())
+            .without_managed_config()
+            .build_initialized_with_timeout(test_timeout)
+            .await?;
+        let resume_id = mcp
+            .send_thread_resume_request(ThreadResumeParams {
+                thread_id,
+                ..Default::default()
+            })
+            .await?;
+        let ThreadResumeResponse {
+            sandbox,
+            active_permission_profile,
+            ..
+        } = timeout(test_timeout, mcp.read_response(resume_id)).await??;
+
+        assert!(matches!(sandbox, AppSandboxPolicy::DangerFullAccess));
+        assert_eq!(
+            active_permission_profile,
+            Some(ActivePermissionProfile::new(
+                BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS,
+            ))
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn cold_resume_restores_profile_selected_by_settings_update() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
